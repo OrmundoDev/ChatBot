@@ -1,0 +1,13 @@
+pycache/
+*.py[cod]
+.venv/
+venv/
+.egg-info/
+.env
+.env.
+!.env.example
+logs/
+*.log
+knowledge_base/processed/
+data/
+.DS_Store
