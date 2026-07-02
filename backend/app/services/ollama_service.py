@@ -37,6 +37,7 @@ async def perguntar_para_ia(pergunta: str, contexto: str = "") -> str:
             {"role": "user", "content": user_content},
         ],
         "stream": False,
+        "keep_alive": "30m",
         "options": {"temperature": 0.4},  # um pouco mais alto que antes: aqui queremos naturalidade, não rigidez
     }
 

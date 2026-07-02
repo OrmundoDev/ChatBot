@@ -10,7 +10,8 @@ async def gerar_embedding(texto: str) -> list[float]:
 
     payload = {
         "model": EMBEDDING_MODEL,
-        "input": texto
+        "input": texto,
+        "keep_alive": "30m"
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:
