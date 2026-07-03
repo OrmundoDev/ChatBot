@@ -1,12 +1,32 @@
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-from sqlalchemy.orm import declarative_base
-from app.core.config import DATABASE_URL
+"""
+Configuração da conexão com o banco de dados.
 
-# engine = conexão real com o PostgreSQL
-engine = create_async_engine(DATABASE_URL, echo=False)
+Responsabilidade única: criar o engine e a fábrica de sessões.
+O Base (schema) fica em base.py.
+Os models (tabelas) ficam em models/.
+"""
 
-# Fábrica de sessões: cada requisição vai pedir uma sessão nova a partir daqui
-AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+from sqlalchemy.ext.asyncio import (
+    create_async_engine,
+    async_sessionmaker,
+    AsyncSession,
+)
+from app.db.base import Base  # ← vem do base.py, não mais daqui
+from app.core.config import settings
 
-# Toda tabela do projeto vai herdar desta Base
-Base = declarative_base()
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=False,
+    # Verifica se a conexão ainda está viva antes de usar
+    pool_pre_ping=True,
+)
+
+# Cada requisição HTTP recebe sua própria sessão isolada
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+# Re-exporta o Base para compatibilidade com imports existentes
+__all__ = ["engine", "AsyncSessionLocal", "Base"]

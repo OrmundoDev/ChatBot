@@ -1,19 +1,16 @@
 """
 Webhook do WhatsApp Cloud API (Meta).
 
-Duas rotas:
-- GET  /webhooks/whatsapp_cloud  → verificação do endpoint (uma vez só)
-- POST /webhooks/whatsapp_cloud  → mensagens dos usuários (contínuo)
-
-Etapa 2: o phone_number_id do payload será usado para buscar
-         qual channel/agent está associado a este número no banco.
+GET /webhooks/whatsapp_cloud → verificação do endpoint (uma vez só)
+POST /webhooks/whatsapp_cloud → mensagens dos usuários (contínuo)
 """
 
 import logging
-from fastapi import APIRouter, Request, Response, Depends, HTTPException
+from fastapi import APIRouter, Request, Response, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.channels.factory import get_channel_provider
+from app.db.repositories.channel_repository import ChannelRepository
 from app.services.conversation_service import ConversationService
 from app.api.dependencies.db import get_db
 
@@ -25,22 +22,17 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 async def verify_whatsapp_cloud_webhook(request: Request):
     """
     Verificação do webhook pela Meta.
-
-    A Meta faz esta chamada uma única vez quando você configura
-    o webhook no painel de desenvolvedor. Devemos retornar o
-    hub.challenge para confirmar que o endpoint é nosso.
+    Chamada uma única vez quando você configura o webhook no painel.
     """
     params = dict(request.query_params)
-    logger.info(f"[WhatsAppCloud] Solicitação de verificação recebida: {params}")
-
     provider = get_channel_provider("whatsapp_cloud")
     challenge = await provider.verify_webhook(params)
 
     if challenge:
-        # Retorna o challenge como texto simples — exigência da Meta
         return Response(content=challenge, media_type="text/plain")
 
-    raise HTTPException(status_code=403, detail="Falha na verificação do webhook")
+    from fastapi import HTTPException
+    raise HTTPException(status_code=403, detail="Falha na verificação")
 
 
 @router.post("/whatsapp_cloud")
@@ -49,57 +41,54 @@ async def receive_whatsapp_cloud_message(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Recebe mensagens do WhatsApp Cloud API.
-
-    IMPORTANTE: Sempre retorna 200 imediatamente.
-    A Meta interpreta qualquer status != 200 como falha e
-    tentará reenviar. Erros internos são logados, não expostos.
-
-    Etapa 2: vai buscar o channel e agent no banco pelo phone_number_id.
+    Recebe mensagens do WhatsApp Cloud.
+    Sempre retorna 200 — a Meta considera qualquer outro status como falha.
     """
-    # Retornamos 200 para a Meta imediatamente (requisito deles)
-    # O processamento acontece antes, mas qualquer erro é contido
     try:
         payload = await request.json()
-        logger.info(f"[WhatsAppCloud] Webhook recebido")
 
-        provider = get_channel_provider("whatsapp_cloud")
+        # Extrai o phone_number_id para identificar o canal no banco
+        phone_number_id = (
+            payload.get("entry", [{}])[0]
+            .get("changes", [{}])[0]
+            .get("value", {})
+            .get("metadata", {})
+            .get("phone_number_id", "")
+        )
+
+        # Busca o canal no banco pelo identifier
+        channel = await ChannelRepository.get_by_identifier(
+            db, "whatsapp_cloud", phone_number_id
+        )
+
+        # Config: prioriza banco, fallback para .env (enquanto não migrado)
+        config = channel.config if channel else None
+        agent_id = channel.agent_id if channel else None
+        channel_id = channel.id if channel else None
+
+        provider = get_channel_provider("whatsapp_cloud", config=config)
         incoming = await provider.parse_incoming(payload)
 
         if incoming is None:
-            # Mensagem ignorada (status, mídia, etc.) — OK para a Meta
             return Response(content="OK", status_code=200)
 
-        logger.info(
-            f"[WhatsAppCloud] Mensagem de {incoming.from_id}: "
-            f"{incoming.content[:50]}..."
-        )
+        logger.info(f"[WhatsAppCloud] Mensagem de {incoming.from_id}")
 
-        # Processa com o ConversationService
         service = ConversationService(db=db)
         resposta = await service.handle_message(
             pergunta=incoming.content,
             session_id=incoming.session_id,
-            chatbot_id=incoming.chatbot_id,
+            agent_id=agent_id,
+            channel_id=channel_id,
+            from_id=incoming.from_id,
             channel_provider="whatsapp_cloud",
         )
 
-        # Envia a resposta de volta ao usuário
-        enviado = await provider.send_message(
-            to_id=incoming.from_id,
-            content=resposta,
-        )
-
-        if not enviado:
-            logger.error(
-                f"[WhatsAppCloud] Falha ao enviar resposta para {incoming.from_id}"
-            )
+        # Só envia resposta se o bot estiver ativo
+        if resposta is not None:
+            await provider.send_message(incoming.from_id, resposta)
 
     except Exception as e:
-        # Loga o erro mas retorna 200 para não travar os reenvios da Meta
-        logger.error(
-            f"[WhatsAppCloud] Erro no processamento do webhook: {e}",
-            exc_info=True,
-        )
+        logger.error(f"[WhatsAppCloud] Erro: {e}", exc_info=True)
 
     return Response(content="OK", status_code=200)

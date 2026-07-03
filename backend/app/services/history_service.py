@@ -1,95 +1,124 @@
 """
-HistoryService — gerencia o histórico de conversa de uma sessão.
+HistoryService — gerencia o histórico real de conversa.
 
 Responsabilidade única:
-Carregar as mensagens anteriores de uma sessão e salvar
-novas mensagens ao final de cada interação.
-
-AGORA (Etapa 1):
-- load() retorna lista vazia (cada mensagem ainda é stateless)
-- save() persiste na tabela 'conversas' atual (já existente)
-
-ETAPA 4:
-- load() vai buscar as últimas N mensagens da tabela 'mensagens'
-  filtradas por session_id, para construir a memória da conversa.
-- save() vai salvar cada mensagem (user e assistant) separadamente
-  na tabela 'mensagens' com o session_id correto.
-
-Com isso, o chatbot vai conseguir entender referências como:
-  "Quero marcar uma tomografia."
-  "Pode ser de manhã?"
-Sem precisar repetir o contexto.
+- Buscar ou criar a conversa ativa pelo session_id
+- Carregar as mensagens anteriores para dar memória à IA
+- Salvar a interação atual após a IA responder
+- Salvar apenas a mensagem do usuário quando o bot está pausado
 """
 
 import time
+from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Conversa
+from app.db.models.conversation import Conversation
+from app.db.repositories.conversation_repository import ConversationRepository
 from app.llm.base import ChatMessage
 
 
 class HistoryService:
-    """
-    Gerencia o histórico de conversas de uma sessão.
-
-    Recebe a sessão de banco via construtor pelo mesmo motivo
-    do KnowledgeService: compartilhar a sessão da requisição.
-    """
 
     def __init__(self, db: AsyncSession):
         self.db = db
+        # Armazena a conversa ativa internamente para não
+        # precisar passá-la em cada chamada de método
+        self._conversation: Conversation | None = None
 
-    async def load(self, session_id: str | None) -> list[ChatMessage]:
-        """
-        Carrega o histórico de mensagens de uma sessão.
-
-        Args:
-            session_id: identificador da sessão de conversa.
-                        Etapa 4: este ID será usado para buscar
-                        as mensagens anteriores no banco.
-
-        Returns:
-            Lista de ChatMessage no formato que o PromptBuilder espera.
-            Por enquanto sempre vazia — sem memória entre mensagens.
-        """
-        # ── Etapa 4: substituir por: ─────────────────────────────────────
-        # mensagens = await self.db.execute(
-        #     select(Mensagem)
-        #     .where(Mensagem.conversa_id == session_id)
-        #     .order_by(Mensagem.criado_em.asc())
-        #     .limit(10)   # janela de contexto
-        # )
-        # return [
-        #     {"role": m.role, "content": m.conteudo}
-        #     for m in mensagens.scalars().all()
-        # ]
-        # ─────────────────────────────────────────────────────────────────
-        return []
-
-    async def save(
+    async def get_or_create_conversation(
         self,
-        session_id: str | None,
-        pergunta: str,
-        resposta: str,
-    ) -> None:
+        session_id: str,
+        agent_id: UUID | str,
+        channel_id: UUID | str | None = None,
+        from_id: str | None = None,
+    ) -> Conversation:
         """
-        Persiste a interação atual no banco.
+        Busca a conversa ativa pelo session_id ou cria uma nova.
 
-        Args:
-            session_id: identificador da sessão (Etapa 4).
-            pergunta: mensagem enviada pelo usuário.
-            resposta: resposta gerada pela IA.
-
-        AGORA: salva na tabela 'conversas' (formato atual).
-        ETAPA 4: salva duas linhas na tabela 'mensagens'
-                 (uma com role='user', outra com role='assistant'),
-                 ambas vinculadas ao session_id.
+        Retorna o objeto Conversation completo para que o
+        ConversationService possa verificar o campo 'status'
+        antes de decidir se a IA deve ou não responder.
         """
+        if isinstance(agent_id, str):
+            agent_id = UUID(agent_id)
+        if isinstance(channel_id, str):
+            channel_id = UUID(channel_id)
+
+        conversation = await ConversationRepository.get_or_create(
+            db=self.db,
+            session_id=session_id,
+            agent_id=agent_id,
+            channel_id=channel_id,
+            from_id=from_id,
+        )
+        self._conversation = conversation
+        return conversation
+
+    async def load(self) -> list[ChatMessage]:
+        """
+        Carrega o histórico de mensagens da conversa ativa.
+
+        Retorna no formato que o PromptBuilder espera:
+        [
+          {"role": "user",      "content": "Preciso de um visto"},
+          {"role": "assistant", "content": "Para solicitar..."},
+          ...
+        ]
+        O PromptBuilder insere essas mensagens entre o system
+        prompt e a pergunta atual — dando memória real à IA.
+        """
+        if self._conversation is None:
+            return []
+
         t = time.perf_counter()
+        messages = await ConversationRepository.get_recent_messages(
+            self.db,
+            self._conversation.id,
+            limit=10,
+        )
+        print(
+            f"[HistoryService] {len(messages)} mensagens carregadas "
+            f"em {time.perf_counter() - t:.2f}s"
+        )
 
-        # Persistência temporária na tabela atual enquanto Etapa 4 não chega
-        nova_conversa = Conversa(pergunta=pergunta, resposta=resposta)
-        self.db.add(nova_conversa)
-        await self.db.commit()
+        return [
+            {"role": m.role, "content": m.content}
+            for m in messages
+        ]
 
-        print(f"[HistoryService][TEMPO] Save: {time.perf_counter() - t:.2f}s")
+    async def save(self, pergunta: str, resposta: str) -> None:
+        """
+        Salva a pergunta e a resposta como mensagens separadas.
+
+        Chamado quando o bot respondeu com sucesso.
+        Na próxima mensagem do mesmo usuário, estas duas linhas
+        aparecerão no load() e darão contexto à IA.
+        """
+        if self._conversation is None:
+            return
+
+        t = time.perf_counter()
+        await ConversationRepository.save_messages(
+            self.db,
+            self._conversation.id,
+            pergunta,
+            resposta,
+        )
+        print(f"[HistoryService] Salvo em {time.perf_counter() - t:.2f}s")
+
+    async def save_user_message(self, pergunta: str) -> None:
+        """
+        Salva apenas a mensagem do usuário, sem resposta da IA.
+
+        Chamado quando conversation.status != 'ai_active'.
+        O operador humano verá a mensagem no painel, mas o bot
+        não vai responder.
+        """
+        if self._conversation is None:
+            return
+
+        await ConversationRepository.save_user_message(
+            self.db,
+            self._conversation.id,
+            pergunta,
+        )

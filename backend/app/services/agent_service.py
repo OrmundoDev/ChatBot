@@ -1,116 +1,79 @@
 """
-AgentService — carrega as configurações de um agente (chatbot).
+AgentService — carrega configurações de um agente do banco de dados.
 
 Responsabilidade única:
-Dado um chatbot_id, retorna o AgentConfig com tudo que
-o ConversationService precisa saber sobre aquele agente.
+Dado um agent_id (ou None para o padrão), retorna um AgentConfig
+com todas as configurações que o ConversationService precisa.
 
-AGORA (Etapa 1):
-Retorna configurações padrão hardcoded — ainda não há tabela
-de chatbots no banco.
-
-ETAPA 2:
-AgentService.load() vai fazer SELECT na tabela 'chatbots'
-e retornar as configurações salvas para aquele chatbot_id.
-Nenhum outro arquivo vai precisar mudar.
-
-ETAPA 5:
-Cada chatbot terá seu próprio provider_name e model,
-que também virão do banco aqui.
+Etapa 6: o painel administrativo permitirá criar e editar agentes
+         sem tocar no código — as mudanças aparecerão aqui automaticamente.
 """
 
-from dataclasses import dataclass, field
+from uuid import UUID
+from dataclasses import dataclass
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.db.repositories.agent_repository import AgentRepository
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# AgentConfig — envelope de dados do agente
-#
-# Não é um modelo de banco de dados (não herda de Base).
-# Não é um schema HTTP (não herda de BaseModel).
-# É apenas um "envelope de dados" que trafega entre os serviços internos.
-# ─────────────────────────────────────────────────────────────────────────────
 @dataclass
 class AgentConfig:
     """
-    Configurações completas de um agente/chatbot.
+    Envelope de dados do agente que trafega entre os serviços.
 
-    Todos os campos que o ConversationService precisa para coordenar
-    uma resposta estão aqui. Isso evita que os outros serviços precisem
-    consultar o banco individualmente.
+    Não é um model de banco (não herda de Base).
+    Não é um schema HTTP (não herda de BaseModel).
+    É um objeto imutável que carrega as configurações
+    de um ponto a outro do sistema sem expor o ORM.
     """
     system_prompt: str
-
-    # Etapa 5: cada chatbot terá seu próprio provider e modelo
     provider_name: str = "ollama"
-    model: str | None = None          # None = usa o padrão do .env
+    model: str | None = None
     temperature: float = 0.4
-
-    # Etapa 2 e 3: identificadores para isolar dados por empresa/chatbot
     company_id: str | None = None
-    chatbot_id: str | None = None
+    agent_id: str | None = None
     name: str = "Assistente"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Prompt padrão — Etapa 2: virá do banco (tabela 'chatbots')
-# ─────────────────────────────────────────────────────────────────────────────
-_DEFAULT_SYSTEM_PROMPT = (
-    "Você é um assistente virtual que ajuda com diversos assuntos, com "
-    "conhecimento especializado em imigração.\n\n"
-    "INSTRUÇÕES:\n"
-    "1. Quando o CONTEXTO abaixo contiver informação relevante para a "
-    "pergunta, use-o como base principal da resposta.\n"
-    "2. Quando o CONTEXTO não for relevante para a pergunta, ou estiver "
-    "vazio, responda normalmente usando seu próprio conhecimento, como "
-    "qualquer assistente de IA faria.\n"
-    "3. Nunca mencione a existência de um 'contexto', 'documentos' ou "
-    "'base de conhecimento'. Nunca diga frases como 'não encontrei isso' "
-    "ou 'baseado nos documentos fornecidos'.\n"
-    "4. A resposta deve parecer uma única conversa natural e fluida, "
-    "independente de você ter usado o contexto ou seu conhecimento geral."
-)
-
-
 class AgentService:
-    """
-    Responsável por carregar as configurações de um agente.
-
-    Etapa 1: retorna AgentConfig com valores padrão (hardcoded).
-    Etapa 2: vai receber um db: AsyncSession e fazer query na
-             tabela 'chatbots' para popular o AgentConfig com
-             os dados reais do banco.
-    """
 
     @staticmethod
-    async def load(chatbot_id: str | None = None) -> AgentConfig:
+    async def load(
+        db: AsyncSession,
+        agent_id: UUID | str | None = None,
+    ) -> AgentConfig:
         """
-        Carrega a configuração do agente solicitado.
+        Carrega as configurações do agente do banco de dados.
 
-        Args:
-            chatbot_id: ID do chatbot no banco (Etapa 2).
-                        Por enquanto ignorado — só existe um agente padrão.
+        Se agent_id for None, retorna o primeiro agente ativo.
+        Isso mantém o /chat via n8n funcionando sem precisar
+        especificar qual agente deve responder.
 
-        Returns:
-            AgentConfig com todas as configurações necessárias.
+         o painel passará o agent_id correto baseado
+                 no canal que recebeu a mensagem.
         """
-        # ── Etapa 2: substituir este bloco por: ──────────────────────────
-        # chatbot = await db.get(Chatbot, chatbot_id)
-        # if not chatbot:
-        #     raise ValueError(f"Chatbot {chatbot_id} não encontrado")
-        # return AgentConfig(
-        #     system_prompt=chatbot.system_prompt,
-        #     provider_name=chatbot.provider,
-        #     model=chatbot.model,
-        #     temperature=chatbot.temperature,
-        #     company_id=str(chatbot.company_id),
-        #     chatbot_id=str(chatbot.id),
-        #     name=chatbot.nome,
-        # )
-        # ─────────────────────────────────────────────────────────────────
+        agent = None
+
+        if agent_id:
+            if isinstance(agent_id, str):
+                agent_id = UUID(agent_id)
+            agent = await AgentRepository.get_by_id(db, agent_id)
+
+        # Fallback: primeiro agente ativo da plataforma
+        if agent is None:
+            agent = await AgentRepository.get_default(db)
+
+        if agent is None:
+            raise RuntimeError(
+                "Nenhum agente encontrado no banco. "
+                "Execute: alembic upgrade head"
+            )
 
         return AgentConfig(
-            system_prompt=_DEFAULT_SYSTEM_PROMPT,
-            provider_name="ollama",
-            temperature=0.4,
-            name="Assistente de Imigração",
+            system_prompt=agent.system_prompt,
+            provider_name=agent.llm_provider,
+            model=agent.llm_model,
+            temperature=agent.temperature,
+            company_id=str(agent.company_id),
+            agent_id=str(agent.id),
+            name=agent.name,
         )

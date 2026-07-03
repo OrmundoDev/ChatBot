@@ -2,21 +2,17 @@
 ConversationService — coordenador do fluxo de conversa.
 
 Responsabilidade única:
-Orquestrar os serviços especializados em ordem correta
-para transformar uma mensagem do usuário em uma resposta da IA.
+Orquestrar os serviços em ordem correta para transformar
+uma mensagem do usuário em uma resposta da IA.
 
-Este arquivo NÃO deve conter:
-- Lógica de busca de embeddings (→ KnowledgeService)
-- Lógica de construção de prompts (→ PromptBuilder)
-- Lógica de histórico de conversa (→ HistoryService)
-- Lógica de configuração de agentes (→ AgentService)
-- Comunicação com APIs de IA (→ LLMProvider)
-
-Se alguma dessas coisas precisar mudar, este arquivo
-não deve ser tocado.
+Inclui verificação do status da conversa:
+- 'ai_active'    → fluxo completo (IA responde)
+- 'human_active' → salva mensagem, retorna None (humano atende)
+- 'waiting_human'→ salva mensagem, retorna None (aguarda humano)
 """
 
 import time
+from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.agent_service import AgentService
@@ -27,13 +23,6 @@ from app.llm.factory import get_llm_provider
 
 
 class ConversationService:
-    """
-    Coordena o fluxo completo de uma mensagem até a resposta.
-
-    A sessão de banco é injetada aqui e repassada para os
-    serviços que precisam de I/O (KnowledgeService, HistoryService).
-    AgentService e PromptBuilder não precisam de banco.
-    """
 
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -41,57 +30,81 @@ class ConversationService:
     async def handle_message(
         self,
         pergunta: str,
-        chatbot_id: str | None = None,   # Etapa 2: identificar qual chatbot
-        session_id: str | None = None,   # Etapa 4: identificar a sessão
+        session_id: str = "default:anonymous",
+        agent_id: UUID | str | None = None,
+        channel_id: UUID | str | None = None,
+        from_id: str | None = None,
         channel_provider: str | None = None,
-   ) -> str:
+    ) -> str | None:
         """
         Processa uma mensagem e retorna a resposta da IA.
 
-        Args:
-            pergunta: texto enviado pelo usuário.
-            chatbot_id: qual chatbot/agente deve responder.
-                        Etapa 2: cada empresa terá seu próprio chatbot_id.
-            session_id: qual sessão de conversa está ativa.
-                        Etapa 4: permite carregar o histórico correto.
-
-        Returns:
-            Texto da resposta gerada pela IA.
+        Retorna:
+            str  → resposta da IA (bot ativo)
+            None → bot pausado (mensagem salva, nenhuma resposta enviada)
         """
         inicio = time.perf_counter()
-        # Log de contexto - util para rastrear de qual canal veio a mensagem
+
         if channel_provider:
-            print(f"[ConversationService] Canal: {channel_provider} | Sessão: {session_id}")
-        # ── 1. Carregar configurações do agente ───────────────────────────
-        # "Quem vai responder? Com qual personalidade e modelo?"
-        agente = await AgentService.load(chatbot_id)
+            print(
+                f"[ConversationService] Canal: {channel_provider} "
+                f"| Sessão: {session_id}"
+            )
 
-        # ── 2. Buscar contexto no Knowledge Base ──────────────────────────
-        # "O que os documentos da empresa sabem sobre isso?"
-        knowledge = KnowledgeService(self.db)
-        contexto = await knowledge.search(pergunta, agente.company_id)
+        # ── 1. Qual agente responde? ───────────────────────────────────────
+        # Busca no banco pelo agent_id ou retorna o agente padrão
+        agente = await AgentService.load(self.db, agent_id)
 
-        # ── 3. Carregar histórico da sessão ───────────────────────────────
-        # "O que foi dito antes nesta conversa?"
+        # ── 2. Qual conversa está ativa? ──────────────────────────────────
+        # Busca pelo session_id ou cria uma nova com status='ai_active'
         history_svc = HistoryService(self.db)
-        historico = await history_svc.load(session_id)
+        conversation = await history_svc.get_or_create_conversation(
+            session_id=session_id,
+            agent_id=UUID(agente.agent_id),
+            channel_id=channel_id,
+            from_id=from_id,
+        )
 
-        # ── 4. Montar o pacote de mensagens para a IA ─────────────────────
-        # "Como empacotar tudo isso para o modelo entender?"
+        # ── 3. O bot pode responder? ──────────────────────────────────────
+        # Verifica o status da conversa antes de acionar a IA
+        if conversation.status != "ai_active":
+            print(
+                f"[ConversationService] Bot pausado "
+                f"(status={conversation.status}) — salvando mensagem sem resposta"
+            )
+            # Salva a mensagem do usuário para o operador humano ver
+            await history_svc.save_user_message(pergunta)
+            # Retorna None: o webhook não vai enviar resposta
+            return None
+
+        # ── 4. O que os documentos sabem sobre isso? ──────────────────────
+        knowledge = KnowledgeService(self.db)
+        contexto = await knowledge.search(
+            pergunta,
+            company_id=agente.company_id,
+        )
+
+        # ── 5. O que foi dito antes nesta sessão? ─────────────────────────
+        historico = await history_svc.load()
+
+        # ── 6. Monta o pacote de mensagens para a IA ──────────────────────
         messages = PromptBuilder.build(agente, contexto, historico, pergunta)
 
-        # Descomente para ver o prompt completo no terminal durante debug:
-        # PromptBuilder.debug(messages)
+        # ── 7. Qual IA usa? Chama e gera a resposta ───────────────────────
+        provider = get_llm_provider(
+            agente.provider_name,
+            model=agente.model,
+        )
+        resposta = await provider.generate(
+            messages,
+            temperature=agente.temperature,
+        )
 
-        # ── 5. Obter o provider e gerar a resposta ────────────────────────
-        # "Qual IA usar? Qual modelo? Qual temperatura?"
-        provider = get_llm_provider(agente.provider_name, model=agente.model)
-        resposta = await provider.generate(messages, temperature=agente.temperature)
+        # ── 8. Salva pergunta + resposta no histórico ─────────────────────
+        await history_svc.save(pergunta, resposta)
 
-        # ── 6. Salvar a interação no banco ────────────────────────────────
-        # "Registrar o que aconteceu para histórico e métricas."
-        await history_svc.save(session_id, pergunta, resposta)
-
-        print(f"[ConversationService][TEMPO] TOTAL: {time.perf_counter() - inicio:.2f}s")
-
+        print(
+            f"[ConversationService] TOTAL: "
+            f"{time.perf_counter() - inicio:.2f}s"
+        )
         return resposta

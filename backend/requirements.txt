@@ -31,3 +31,4 @@ websockets==16.0
 pydantic==2.13.4
 pydantic-settings==2.14.2
 pydantic_core==2.46.4
+alembic==1.18.5
