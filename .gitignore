@@ -8,6 +8,6 @@ venv/
 !.env.example
 logs/
 *.log
-knowledge_base/processed/
+knowledge_base/
 data/
 .DS_Store
