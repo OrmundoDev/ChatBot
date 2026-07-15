@@ -1,22 +1,16 @@
-import httpx
-from app.core.config import OLLAMA_HOST, EMBEDDING_MODEL
+from openai import AsyncOpenAI
+from app.core.config import settings
+
+_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
 
 async def gerar_embedding(texto: str) -> list[float]:
     """
-    Envia um texto para o Ollama e retorna seu vetor de embedding (1024 posições).
+    Envia um texto para a OpenAI e retorna seu vetor de embedding
+    (1536 posições, modelo text-embedding-3-small).
     """
-    url = f"{OLLAMA_HOST}/api/embed"
-
-    payload = {
-        "model": EMBEDDING_MODEL,
-        "input": texto,
-        "keep_alive": "30m"
-    }
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        resposta = await client.post(url, json=payload)
-        resposta.raise_for_status()
-        dados = resposta.json()
-
-    return dados["embeddings"][0]
+    resposta = await _client.embeddings.create(
+        model=settings.EMBEDDING_MODEL,
+        input=texto,
+    )
+    return resposta.data[0].embedding

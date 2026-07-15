@@ -78,7 +78,7 @@ def upgrade() -> None:
             company_id    UUID         NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             name          VARCHAR(255) NOT NULL,
             description   TEXT,
-            llm_provider  VARCHAR(50)  NOT NULL DEFAULT 'ollama',
+            llm_provider  VARCHAR(50)  NOT NULL DEFAULT 'openai',
             llm_model     VARCHAR(100),
             temperature   FLOAT        NOT NULL DEFAULT 0.4,
             system_prompt TEXT         NOT NULL,
@@ -164,7 +164,7 @@ def upgrade() -> None:
             company_id  UUID        NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             agent_id    UUID        REFERENCES agents(id) ON DELETE SET NULL,
             content     TEXT        NOT NULL,
-            embedding   vector(1024),
+            embedding   vector(1536),
             created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """))
@@ -198,8 +198,8 @@ def upgrade() -> None:
             :company_id,
             'Assistente de Imigração',
             'Agente padrão — configure pelo painel administrativo (Etapa 6)',
-            'ollama',
-            'qwen2.5-coder:3b',
+            'openai',
+            'gpt-5.4-mini',
             0.4,
             :prompt
         )
