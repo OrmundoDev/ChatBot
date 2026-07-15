@@ -20,17 +20,33 @@ class ChannelRepository:
 
         Chamado pelos webhooks para descobrir qual agente deve
         responder, baseado em qual número/instância recebeu a mensagem.
-
-        Exemplo:
-        - Chega webhook do WhatsApp Cloud com phone_number_id = "12345"
-        - Buscamos: provider="whatsapp_cloud", identifier="12345"
-        - Retornamos o channel com agent_id e config do banco
-        - Passamos agent_id para o ConversationService
         """
         result = await db.execute(
             select(Channel)
             .where(Channel.provider == provider)
             .where(Channel.identifier == identifier)
+            .where(Channel.status == "active")
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_by_verify_token(
+        db: AsyncSession,
+        provider: str,
+        verify_token: str,
+    ) -> Channel | None:
+        """
+        Busca um canal pelo verify_token guardado em config (JSON).
+
+        Usado na verificação do webhook (GET), que a Meta chama sem
+        informar qual phone_number_id está sendo configurado — só o
+        token. Por isso a busca precisa ser pelo token, não pelo
+        identifier.
+        """
+        result = await db.execute(
+            select(Channel)
+            .where(Channel.provider == provider)
+            .where(Channel.config["verify_token"].astext == verify_token)
             .where(Channel.status == "active")
         )
         return result.scalar_one_or_none()

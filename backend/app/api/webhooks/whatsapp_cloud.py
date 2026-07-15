@@ -19,13 +19,27 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 
 @router.get("/whatsapp_cloud")
-async def verify_whatsapp_cloud_webhook(request: Request):
+async def verify_whatsapp_cloud_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """
     Verificação do webhook pela Meta.
-    Chamada uma única vez quando você configura o webhook no painel.
+    Chamada uma vez para cada cliente, quando ele configura o webhook
+    no próprio painel do Meta for Developers. Busca no banco qual
+    canal tem esse verify_token, já que a Meta não informa o
+    phone_number_id nessa chamada.
     """
     params = dict(request.query_params)
-    provider = get_channel_provider("whatsapp_cloud")
+    token = params.get("hub.verify_token")
+
+    channel = (
+        await ChannelRepository.get_by_verify_token(db, "whatsapp_cloud", token)
+        if token else None
+    )
+    config = channel.config if channel else None
+
+    provider = get_channel_provider("whatsapp_cloud", config=config)
     challenge = await provider.verify_webhook(params)
 
     if challenge:
