@@ -38,14 +38,13 @@ def upgrade() -> None:
     print("\n  [001] Iniciando criação do schema...")
 
     # ── Extensões ──────────────────────────────────────────────────────────
-    conn.execute(text('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"'))
     conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     print("  [001] Extensões habilitadas (uuid-ossp, vector)")
 
     # ── 1. companies ───────────────────────────────────────────────────────
     conn.execute(text("""
         CREATE TABLE companies (
-            id         UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+            id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
             name       VARCHAR(255) NOT NULL,
             slug       VARCHAR(100) NOT NULL UNIQUE,
             status     VARCHAR(20)  NOT NULL DEFAULT 'active',
@@ -58,7 +57,7 @@ def upgrade() -> None:
     # ── 2. users ───────────────────────────────────────────────────────────
     conn.execute(text("""
         CREATE TABLE users (
-            id            UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+            id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
             company_id    UUID         NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             name          VARCHAR(255) NOT NULL,
             email         VARCHAR(255) NOT NULL UNIQUE,
@@ -74,7 +73,7 @@ def upgrade() -> None:
     # ── 3. agents ──────────────────────────────────────────────────────────
     conn.execute(text("""
         CREATE TABLE agents (
-            id            UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+            id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
             company_id    UUID         NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             name          VARCHAR(255) NOT NULL,
             description   TEXT,
@@ -92,7 +91,7 @@ def upgrade() -> None:
     # ── 4. channels ────────────────────────────────────────────────────────
     conn.execute(text("""
         CREATE TABLE channels (
-            id         UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+            id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
             agent_id   UUID         NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
             provider   VARCHAR(50)  NOT NULL,
             identifier VARCHAR(255) NOT NULL,
@@ -108,7 +107,7 @@ def upgrade() -> None:
     # ── 5. conversations ───────────────────────────────────────────────────
     conn.execute(text("""
         CREATE TABLE conversations (
-            id         UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+            id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
             agent_id   UUID         NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
             channel_id UUID         REFERENCES channels(id) ON DELETE SET NULL,
             session_id VARCHAR(255) NOT NULL,
@@ -128,7 +127,7 @@ def upgrade() -> None:
     # ── 6. messages ────────────────────────────────────────────────────────
     conn.execute(text("""
         CREATE TABLE messages (
-            id              UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+            id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
             conversation_id UUID        NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
             role            VARCHAR(20) NOT NULL,
             content         TEXT        NOT NULL,
@@ -145,7 +144,7 @@ def upgrade() -> None:
     # ── 7. documents ───────────────────────────────────────────────────────
     conn.execute(text("""
         CREATE TABLE documents (
-            id         UUID         PRIMARY KEY DEFAULT uuid_generate_v4(),
+            id         UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
             company_id UUID         NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             agent_id   UUID         REFERENCES agents(id) ON DELETE SET NULL,
             name       VARCHAR(255) NOT NULL,
@@ -159,7 +158,7 @@ def upgrade() -> None:
     # ── 8. chunks ──────────────────────────────────────────────────────────
     conn.execute(text("""
         CREATE TABLE chunks (
-            id          UUID        PRIMARY KEY DEFAULT uuid_generate_v4(),
+            id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
             document_id UUID        REFERENCES documents(id) ON DELETE CASCADE,
             company_id  UUID        NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
             agent_id    UUID        REFERENCES agents(id) ON DELETE SET NULL,
