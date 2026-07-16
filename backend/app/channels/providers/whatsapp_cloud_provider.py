@@ -1,20 +1,23 @@
 """
 WhatsAppCloudProvider — canal de comunicação via WhatsApp Cloud API (Meta).
 
-Esta é a API oficial da Meta para WhatsApp Business.
+Esta é a API oficial da Meta para WhatsApp Business. Também suporta BSPs
+(parceiros homologados pela Meta, como a Datafy) que espelham a mesma API
+sob uma URL e token próprios — nesse caso, basta configurar `api_base_url`
+e `access_token` (o token do parceiro) no `config` do canal, no banco.
 
 FLUXO COMPLETO:
-1. Meta envia GET /webhooks/whatsapp_cloud para verificar o endpoint
-   (acontece uma vez na configuração do webhook no painel da Meta)
-2. Meta envia POST /webhooks/whatsapp_cloud com mensagens dos usuários
-3. Nosso backend processa e responde via Graph API
+1. Meta (ou o BSP) envia GET /webhooks/whatsapp_cloud para verificar o endpoint
+   (acontece uma vez na configuração do webhook)
+2. Meta (ou o BSP) envia POST /webhooks/whatsapp_cloud com mensagens dos usuários
+3. Nosso backend processa e responde via Graph API (direto ou via BSP)
 
-CREDENCIAIS NECESSÁRIAS (no .env por agora, no banco na Etapa 2):
-- WHATSAPP_CLOUD_PHONE_NUMBER_ID: ID do número no painel da Meta
-- WHATSAPP_CLOUD_ACCESS_TOKEN: token de acesso (permanent ou temporário)
-- WHATSAPP_CLOUD_VERIFY_TOKEN: token que você define para verificação do webhook
-
-Etapa 2: tudo isso virá do campo config (JSON) da tabela channels.
+CREDENCIAIS NECESSÁRIAS (tudo no banco, na tabela channels.config):
+- phone_number_id: ID do número (na Meta ou no painel do BSP)
+- access_token: token de acesso (da Meta, ou sk_live_xxx de um BSP)
+- verify_token: token que você define para verificação do webhook
+- api_base_url (opcional): URL base da API. Se omitido, usa a Meta oficial.
+  Exemplo para Datafy: "https://cloud.datafyapi.com.br/v1"
 """
 
 import httpx
@@ -24,39 +27,20 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Versão da Graph API — atualize conforme necessário
+# Versão e URL padrão da Graph API oficial — usada quando o canal não
+# especifica um api_base_url próprio (ex: um BSP) no config.
 GRAPH_API_VERSION = "v19.0"
 GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
 
 class WhatsAppCloudProvider(ChannelProvider):
     """
-    Provedor de canal para a WhatsApp Cloud API (API oficial da Meta).
-
-    Estrutura do webhook de mensagem da Meta:
-    {
-      "object": "whatsapp_business_account",
-      "entry": [{
-        "changes": [{
-          "value": {
-            "metadata": {"phone_number_id": "..."},
-            "contacts": [{"wa_id": "5511999999999"}],
-            "messages": [{
-              "from": "5511999999999",
-              "id": "wamid.xxx",
-              "type": "text",
-              "text": {"body": "Olá"}
-            }]
-          }
-        }]
-      }]
-    }
+    Provedor de canal para a WhatsApp Cloud API — Meta direta ou via BSP.
     """
 
     def __init__(self, config: dict | None = None):
         cfg = config or {}
 
-        # Etapa 2: estes valores virão do banco (tabela channels.config).
         self.phone_number_id = (
             cfg.get("phone_number_id")
             or getattr(settings, "WHATSAPP_CLOUD_PHONE_NUMBER_ID", "")
@@ -69,18 +53,18 @@ class WhatsAppCloudProvider(ChannelProvider):
             cfg.get("verify_token")
             or getattr(settings, "WHATSAPP_CLOUD_VERIFY_TOKEN", "")
         )
+        # Cada canal pode apontar para uma URL de API diferente (Meta direta
+        # ou um BSP homologado, como a Datafy). Padrão: Meta oficial.
+        self.api_base = cfg.get("api_base_url") or GRAPH_API_BASE
 
     async def verify_webhook(self, params: dict) -> str | None:
         """
-        Verifica a autenticidade do webhook da Meta.
+        Verifica a autenticidade do webhook (Meta ou BSP).
 
-        A Meta envia um GET com três parâmetros:
+        Envia um GET com três parâmetros:
         - hub.mode: sempre "subscribe"
-        - hub.verify_token: o token que você configurou no painel da Meta
+        - hub.verify_token: o token que você configurou
         - hub.challenge: um número aleatório que você deve devolver
-
-        Se os tokens baterem, devolvemos o hub.challenge para confirmar
-        que este endpoint nos pertence. É uma segurança da Meta.
         """
         mode = params.get("hub.mode")
         token = params.get("hub.verify_token")
@@ -88,7 +72,7 @@ class WhatsAppCloudProvider(ChannelProvider):
 
         if mode == "subscribe" and token == self.verify_token:
             logger.info("[WhatsAppCloud] Webhook verificado com sucesso")
-            return challenge  # Meta espera receber este valor
+            return challenge
 
         logger.warning(
             f"[WhatsAppCloud] Falha na verificação do webhook. "
@@ -98,15 +82,11 @@ class WhatsAppCloudProvider(ChannelProvider):
 
     async def parse_incoming(self, payload: dict) -> IncomingMessage | None:
         """
-        Transforma o webhook da Meta em IncomingMessage.
-
-        Ignora:
-        - Notificações de status (delivered, read, failed)
-        - Mensagens que não são de texto
-        - Payloads malformados
+        Transforma o webhook (Meta ou BSP) em IncomingMessage.
+        O formato é idêntico em ambos os casos (BSPs homologados espelham
+        o payload oficial da Meta).
         """
         try:
-            # Valida estrutura básica do payload da Meta
             if payload.get("object") != "whatsapp_business_account":
                 return None
 
@@ -114,17 +94,14 @@ class WhatsAppCloudProvider(ChannelProvider):
             if not entries:
                 return None
 
-            # Pega a primeira mudança (em geral só há uma por webhook)
             value = entries[0].get("changes", [{}])[0].get("value", {})
 
-            # Ignora se não há mensagens (ex: notificações de status)
             messages = value.get("messages", [])
             if not messages:
                 return None
 
             message = messages[0]
 
-            # Só processa mensagens de texto
             if message.get("type") != "text":
                 logger.info(
                     f"[WhatsAppCloud] Tipo não suportado ignorado: {message.get('type')}"
@@ -138,7 +115,6 @@ class WhatsAppCloudProvider(ChannelProvider):
             from_id = message.get("from", "")
             message_id = message.get("id", "")
 
-            # Pega o phone_number_id do metadata (confirma qual número recebeu)
             metadata = value.get("metadata", {})
             to_id = metadata.get("phone_number_id", self.phone_number_id)
 
@@ -159,11 +135,8 @@ class WhatsAppCloudProvider(ChannelProvider):
 
     async def send_message(self, to_id: str, content: str) -> bool:
         """
-        Envia uma mensagem via Graph API da Meta.
-
-        Args:
-            to_id: número do destinatário (ex: "5511999999999")
-            content: texto da resposta
+        Envia uma mensagem via Graph API — direto na Meta ou através de um
+        BSP (ex: Datafy), dependendo do api_base configurado neste canal.
         """
         if not self.phone_number_id or not self.access_token:
             logger.error(
@@ -171,7 +144,7 @@ class WhatsAppCloudProvider(ChannelProvider):
             )
             return False
 
-        url = f"{GRAPH_API_BASE}/{self.phone_number_id}/messages"
+        url = f"{self.api_base}/{self.phone_number_id}/messages"
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
