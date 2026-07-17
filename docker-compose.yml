@@ -72,7 +72,6 @@ services:
     env_file:
       - .env
     environment:
-      POSTGRES_HOST: postgres
       EVOLUTION_API_URL: http://evolution_api:8080
     ports:
       - "127.0.0.1:8000:8000"
