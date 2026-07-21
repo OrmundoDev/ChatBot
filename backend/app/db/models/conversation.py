@@ -32,6 +32,9 @@ class Conversation(Base):
     agent_id: Mapped[UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("agents.id"), nullable=False
     )
+    company_id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id"), nullable=False
+    )
     channel_id: Mapped[UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("channels.id"), nullable=True
     )

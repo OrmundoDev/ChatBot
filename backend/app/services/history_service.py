@@ -29,6 +29,7 @@ class HistoryService:
         self,
         session_id: str,
         agent_id: UUID | str,
+        company_id: UUID | str,
         channel_id: UUID | str | None = None,
         from_id: str | None = None,
     ) -> Conversation:
@@ -41,6 +42,8 @@ class HistoryService:
         """
         if isinstance(agent_id, str):
             agent_id = UUID(agent_id)
+        if isinstance(company_id, str):
+            company_id = UUID(company_id)
         if isinstance(channel_id, str):
             channel_id = UUID(channel_id)
 
@@ -48,6 +51,7 @@ class HistoryService:
             db=self.db,
             session_id=session_id,
             agent_id=agent_id,
+            company_id=company_id,
             channel_id=channel_id,
             from_id=from_id,
         )
@@ -101,6 +105,7 @@ class HistoryService:
         await ConversationRepository.save_messages(
             self.db,
             self._conversation.id,
+            self._conversation.company_id,
             pergunta,
             resposta,
         )
@@ -120,5 +125,6 @@ class HistoryService:
         await ConversationRepository.save_user_message(
             self.db,
             self._conversation.id,
+            self._conversation.company_id,
             pergunta,
         )

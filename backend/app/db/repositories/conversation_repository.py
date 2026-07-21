@@ -16,6 +16,7 @@ class ConversationRepository:
         db: AsyncSession,
         session_id: str,
         agent_id: UUID,
+        company_id: UUID,
         channel_id: UUID | None = None,
         from_id: str | None = None,
     ) -> Conversation:
@@ -41,6 +42,7 @@ class ConversationRepository:
         if conversation is None:
             conversation = Conversation(
                 agent_id=agent_id,
+                company_id=company_id,
                 channel_id=channel_id,
                 session_id=session_id,
                 from_id=from_id,
@@ -76,6 +78,7 @@ class ConversationRepository:
     async def save_messages(
         db: AsyncSession,
         conversation_id: UUID,
+        company_id: UUID,
         pergunta: str,
         resposta: str,
     ) -> None:
@@ -88,11 +91,13 @@ class ConversationRepository:
         """
         db.add(Message(
             conversation_id=conversation_id,
+            company_id=company_id,
             role="user",
             content=pergunta,
         ))
         db.add(Message(
             conversation_id=conversation_id,
+            company_id=company_id,
             role="assistant",
             content=resposta,
         ))
@@ -102,6 +107,7 @@ class ConversationRepository:
     async def save_user_message(
         db: AsyncSession,
         conversation_id: UUID,
+        company_id: UUID,
         content: str,
     ) -> None:
         """
@@ -113,6 +119,7 @@ class ConversationRepository:
         """
         db.add(Message(
             conversation_id=conversation_id,
+            company_id=company_id,
             role="user",
             content=content,
         ))

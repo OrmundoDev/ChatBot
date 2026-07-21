@@ -33,6 +33,9 @@ class Message(Base):
     conversation_id: Mapped[UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=False
     )
+    company_id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id"), nullable=False
+    )
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[DateTime] = mapped_column(
