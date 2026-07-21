@@ -12,19 +12,34 @@ Uso avançado (processa um arquivo específico):
         --agent-id   77f2a927-d1e9-46ec-ab18-0a7903dc4cdc \\
         --file backend/knowledge_base/documents/default/meu_arquivo.pdf
 
+Formatos aceitos: .pdf, .txt e .md.
+Arquivos .md têm o frontmatter YAML (bloco "--- ... ---" no topo,
+se existir) removido automaticamente, e são divididos em chunks por
+seção (títulos ## ou ###) em vez de corte cego por caractere — ver
+chunking_service.py.
+
 Como funciona:
 1. Busca os arquivos da pasta da empresa (ou o arquivo especificado)
 2. Para cada arquivo:
-   a. Cria um registro na tabela 'documents'
-   b. Extrai o texto (PDF ou TXT)
-   c. Divide em chunks com sobreposição
-   d. Gera embedding para cada chunk
-   e. Salva na tabela 'chunks' com company_id e agent_id
+   a. Se já existir um documento com o mesmo nome para essa empresa,
+      apaga ele e seus chunks antigos (cascade) ANTES de reprocessar —
+      isso garante que rodar o script de novo nunca duplica conteúdo,
+      e sempre reflete o estado atual do arquivo em disco.
+   b. Cria um novo registro na tabela 'documents'
+   c. Extrai o texto (PDF, TXT ou MD)
+   d. Divide em chunks (por seção se for MD, por caractere se não)
+   e. Gera embedding para cada chunk
+   f. Salva na tabela 'chunks' com company_id e agent_id
 3. O KnowledgeService já filtra por company_id nas buscas RAG
+
+Importante: a substituição é sempre escopada por company_id — rodar
+este script para uma empresa nunca apaga nem afeta documentos de
+outra empresa.
 """
 
 import asyncio
 import argparse
+import re
 from pathlib import Path
 from uuid import UUID
 
@@ -33,7 +48,6 @@ from sqlalchemy import select
 
 from app.db.session import AsyncSessionLocal
 from app.db.models.document import Document
-from app.db.models.chunk import Chunk
 from app.services.embedding_service import gerar_embedding
 from app.services.chunking_service import dividir_em_chunks
 
@@ -50,6 +64,18 @@ def extrair_texto_pdf(caminho: Path) -> str:
     return "\n".join(paginas)
 
 
+def extrair_texto_md(caminho: Path) -> str:
+    """
+    Extrai o texto de um arquivo Markdown, removendo o frontmatter
+    YAML do topo (bloco "--- ... ---"), se existir. O resto do
+    Markdown (títulos, tabelas, listas) é mantido intacto — é usado
+    pelo chunking por seção em chunking_service.py.
+    """
+    texto = caminho.read_text(encoding="utf-8")
+    texto = re.sub(r'^---\s*\n.*?\n---\s*\n', '', texto, count=1, flags=re.DOTALL)
+    return texto
+
+
 def extrair_texto(caminho: Path) -> str | None:
     """
     Extrai texto do arquivo baseado na extensão.
@@ -61,56 +87,72 @@ def extrair_texto(caminho: Path) -> str | None:
         return extrair_texto_pdf(caminho)
     elif sufixo == ".txt":
         return caminho.read_text(encoding="utf-8")
+    elif sufixo == ".md":
+        return extrair_texto_md(caminho)
     else:
         print(f"  ⚠️  Formato não suportado, ignorando: {caminho.name}")
         return None
 
 
-async def documento_ja_processado(
+async def apagar_versao_anterior(
     sessao,
     company_id: UUID,
     nome_arquivo: str,
-) -> bool:
+) -> int:
     """
-    Verifica se o arquivo já foi processado para esta empresa.
+    Apaga qualquer documento existente com esse nome, para essa empresa,
+    e seus chunks (via ON DELETE CASCADE em chunks.document_id — não
+    precisa apagar os chunks manualmente, o Postgres cuida disso).
 
-    Evita duplicar chunks se o script for executado duas vezes
-    com o mesmo arquivo.
+    Escopado por company_id: nunca toca em documentos de outra empresa,
+    mesmo que exista um arquivo de mesmo nome lá.
+
+    Retorna quantos documentos antigos foram apagados (0 = nenhum,
+    ou seja, primeira vez que esse arquivo é processado).
     """
     resultado = await sessao.execute(
         select(Document)
         .where(Document.company_id == company_id)
         .where(Document.name == nome_arquivo)
-        .where(Document.status == "active")
     )
-    return resultado.scalar_one_or_none() is not None
+    documentos_antigos = resultado.scalars().all()
+
+    for documento in documentos_antigos:
+        await sessao.delete(documento)
+
+    if documentos_antigos:
+        await sessao.flush()
+
+    return len(documentos_antigos)
 
 
 async def processar_arquivo(
     caminho: Path,
     company_id: UUID,
     agent_id: UUID,
-    forcar: bool = False,
 ) -> bool:
     """
-    Processa um arquivo e insere seus chunks no banco.
+    Processa um arquivo, substituindo qualquer versão anterior.
 
     Args:
         caminho: caminho completo do arquivo
         company_id: UUID da empresa dona do documento
         agent_id: UUID do agente associado
-        forcar: se True, reprocessa mesmo se já existir
 
     Returns:
-        True se processou com sucesso, False se pulou ou falhou
+        True se processou com sucesso, False se falhou
     """
     print(f"\n📄 Processando: {caminho.name}")
 
     async with AsyncSessionLocal() as sessao:
-        # Verifica duplicidade antes de processar
-        if not forcar and await documento_ja_processado(sessao, company_id, caminho.name):
-            print(f"  ⏭️  Já processado anteriormente. Use --forcar para reprocessar.")
-            return False
+        # Sempre apaga a versão anterior (se existir) antes de recriar —
+        # garante que nunca fica conteúdo duplicado ou desatualizado.
+        apagados = await apagar_versao_anterior(sessao, company_id, caminho.name)
+        if apagados:
+            print(
+                f"  🗑️  Versão anterior encontrada e apagada "
+                f"({apagados} documento(s), chunks removidos em cascata)"
+            )
 
         # ── 1. Extrai o texto do arquivo ──────────────────────────────────
         texto = extrair_texto(caminho)
@@ -121,12 +163,20 @@ async def processar_arquivo(
         print(f"  📝 {len(texto)} caracteres extraídos")
 
         # ── 2. Divide o texto em chunks ───────────────────────────────────
-        chunks = dividir_em_chunks(texto)
-        print(f"  🔪 {len(chunks)} chunk(s) gerado(s)")
+        e_markdown = caminho.suffix.lower() == ".md"
+        chunks = dividir_em_chunks(texto, e_markdown=e_markdown)
+        print(
+            f"  🔪 {len(chunks)} chunk(s) gerado(s)"
+            f"{' (por seção, Markdown)' if e_markdown else ''}"
+        )
 
         # ── 3. Cria o registro na tabela documents ────────────────────────
         # Fazemos isso antes dos chunks para ter o document_id disponível.
-        # Se algo falhar depois, o commit não acontece e nada é salvo.
+        # Se algo falhar depois, o commit não acontece e nada é salvo —
+        # inclusive a exclusão da versão anterior é desfeita junto (mesma
+        # transação), então nunca fica sem nenhuma versão no meio do caminho.
+        from app.db.models.chunk import Chunk
+
         documento = Document(
             company_id=company_id,
             agent_id=agent_id,
@@ -135,7 +185,6 @@ async def processar_arquivo(
             status="active",
         )
         sessao.add(documento)
-        # flush() gera o UUID do documento sem commitar ainda
         await sessao.flush()
 
         print(f"  🗂️  Documento registrado: {documento.id}")
@@ -145,8 +194,8 @@ async def processar_arquivo(
             embedding = await gerar_embedding(conteudo_chunk)
 
             chunk = Chunk(
-                document_id=documento.id,   # FK para o documento pai
-                company_id=company_id,       # duplicado para otimizar busca RAG
+                document_id=documento.id,
+                company_id=company_id,
                 agent_id=agent_id,
                 content=conteudo_chunk,
                 embedding=embedding,
@@ -155,8 +204,6 @@ async def processar_arquivo(
             print(f"  ✅ Chunk {i}/{len(chunks)} processado")
 
         # ── 5. Commit único — tudo ou nada ───────────────────────────────
-        # Se qualquer chunk falhar, o documento também não é salvo.
-        # Isso garante consistência: nunca haverá documento sem chunks.
         await sessao.commit()
 
     print(f"  ✅ Concluído: {caminho.name} ({len(chunks)} chunks salvos)\n")
@@ -165,7 +212,8 @@ async def processar_arquivo(
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="Ingere documentos no Knowledge Base do chatbot"
+        description="Ingere documentos no Knowledge Base do chatbot "
+                     "(substitui automaticamente versões anteriores)"
     )
     parser.add_argument(
         "--company-id",
@@ -187,16 +235,22 @@ async def main():
         "--pasta",
         default=None,
         help="Nome da pasta da empresa dentro de knowledge_base/documents/ "
-             "(padrão: usa o slug da empresa ou 'default')",
+             "(padrão: 'default')",
     )
     parser.add_argument(
         "--forcar",
         action="store_true",
-        help="Reprocessa arquivos mesmo se já foram processados antes",
+        help="Obsoleto — o script já substitui a versão anterior "
+             "automaticamente. Mantido só para não quebrar comandos antigos.",
     )
     args = parser.parse_args()
 
-    # Valida e converte os UUIDs
+    if args.forcar:
+        print(
+            "ℹ️  --forcar não é mais necessário: este script sempre "
+            "substitui versões anteriores automaticamente.\n"
+        )
+
     try:
         company_id = UUID(args.company_id)
         agent_id = UUID(args.agent_id)
@@ -210,7 +264,7 @@ async def main():
         if not caminho.exists():
             print(f"❌ Arquivo não encontrado: {caminho}")
             return
-        await processar_arquivo(caminho, company_id, agent_id, args.forcar)
+        await processar_arquivo(caminho, company_id, agent_id)
         return
 
     # ── Modo pasta (todos os arquivos da empresa) ─────────────────────────
@@ -234,22 +288,19 @@ async def main():
     print(f"   Agente:   {agent_id}")
     print(f"   Pasta:    {pasta}")
     print(f"   Arquivos: {len(arquivos)} encontrado(s)")
-    print(f"   Forçar:   {'sim' if args.forcar else 'não (pula duplicados)'}")
+    print(f"   Modo:     substituição automática (sempre atualiza)")
     print("─" * 50)
 
     processados = 0
-    pulados = 0
     erros = 0
 
     for arquivo in sorted(arquivos):
         try:
-            sucesso = await processar_arquivo(
-                arquivo, company_id, agent_id, args.forcar
-            )
+            sucesso = await processar_arquivo(arquivo, company_id, agent_id)
             if sucesso:
                 processados += 1
             else:
-                pulados += 1
+                erros += 1
         except Exception as e:
             print(f"  ❌ Erro ao processar {arquivo.name}: {e}")
             erros += 1
@@ -257,7 +308,6 @@ async def main():
     print("─" * 50)
     print(f"\n📊 Resumo:")
     print(f"   ✅ Processados: {processados}")
-    print(f"   ⏭️  Pulados:     {pulados}")
     print(f"   ❌ Erros:       {erros}")
 
 
