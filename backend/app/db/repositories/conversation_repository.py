@@ -34,7 +34,7 @@ class ConversationRepository:
             select(Conversation)
             .where(Conversation.session_id == session_id)
             .where(Conversation.agent_id == agent_id)
-            .where(Conversation.status.in_(["ai_active", "human_active", "waiting_human"]))
+            .where(Conversation.status.in_(["ai_active", "ai_off", "ai_wait"]))
             .limit(1)
         )
         conversation = result.scalar_one_or_none()

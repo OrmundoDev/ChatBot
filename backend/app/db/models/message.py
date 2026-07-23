@@ -13,7 +13,7 @@ class Message(Base):
     - role='user'      → o que o usuário enviou
     - role='assistant' → o que a IA respondeu
 
-    Quando o bot está pausado ('human_active'), apenas a
+    Quando o bot está pausado ('ai_off' ou 'ai_wait'), apenas a
     mensagem do usuário é salva — sem mensagem do assistente.
     Isso permite que o operador humano veja o que o cliente escreveu.
 

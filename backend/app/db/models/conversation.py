@@ -17,9 +17,14 @@ class Conversation(Base):
     - "evolution:5511888888888"
 
     'status' controla se o bot responde ou não:
-    - 'ai_active'    → bot responde normalmente (padrão)
-    - 'human_active' → humano está atendendo, bot não responde
-    - 'waiting_human'→ bot pediu intervenção humana
+    - 'ai_active' → bot responde normalmente (padrão)
+    - 'ai_off'    → humano assumiu, bot não responde até reativação manual
+    - 'ai_wait'   → bot pausado temporariamente; volta sozinho quando
+                    'paused_until' vencer (ver scripts/reativar_ia_pausada.py)
+
+    'paused_until' só é usado quando status='ai_wait' — é o horário em
+    que o bot deve voltar a responder automaticamente. Fica NULL nos
+    outros dois status.
 
     Esta abordagem com VARCHAR permite evoluir para novos estados
     sem alterar o schema do banco no futuro.
@@ -42,8 +47,11 @@ class Conversation(Base):
         String(255), nullable=False, index=True
     )
     from_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # Estados possíveis: 'ai_active' | 'human_active' | 'waiting_human'
+    # Estados possíveis: 'ai_active' | 'ai_off' | 'ai_wait'
     status: Mapped[str] = mapped_column(String(30), default="ai_active")
+    paused_until: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

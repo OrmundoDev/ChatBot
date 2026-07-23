@@ -7,8 +7,8 @@ uma mensagem do usuário em uma resposta da IA.
 
 Inclui verificação do status da conversa:
 - 'ai_active'    → fluxo completo (IA responde)
-- 'human_active' → salva mensagem, retorna None (humano atende)
-- 'waiting_human'→ salva mensagem, retorna None (aguarda humano)
+- 'ai_off'    → salva mensagem, retorna None (humano assumiu)
+- 'ai_wait'   → salva mensagem, retorna None (volta sozinho apos o prazo)
 """
 
 import time
@@ -61,6 +61,7 @@ class ConversationService:
         conversation = await history_svc.get_or_create_conversation(
             session_id=session_id,
             agent_id=UUID(agente.agent_id),
+            company_id=agente.company_id,
             channel_id=channel_id,
             from_id=from_id,
         )

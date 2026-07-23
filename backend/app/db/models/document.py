@@ -35,4 +35,10 @@ class Document(Base):
     )
 
     company: Mapped["Company"] = relationship("Company")
-    chunks: Mapped[list["Chunk"]] = relationship("Chunk", back_populates="document")
+    # passive_deletes=True: ao apagar um Document, NÃO desconecta os
+    # Chunks nulando o document_id (comportamento padrão do SQLAlchemy).
+    # Em vez disso, confia no ON DELETE CASCADE já configurado no banco
+    # (chunks_document_id_fkey) para apagar os chunks de verdade.
+    chunks: Mapped[list["Chunk"]] = relationship(
+        "Chunk", back_populates="document", passive_deletes=True
+    )
